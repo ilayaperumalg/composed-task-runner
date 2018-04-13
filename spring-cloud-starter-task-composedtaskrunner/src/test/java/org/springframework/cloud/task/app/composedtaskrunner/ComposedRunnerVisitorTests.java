@@ -132,6 +132,18 @@ public class ComposedRunnerVisitorTests {
 	}
 
 	@Test
+	public void nestedSplitTest() {
+		setupContextForGraph("<<AAA||BBB> && CCC || DDD>");
+		Collection<StepExecution> stepExecutions = getStepExecutions();
+		Set<String> stepNames= getStepNames(stepExecutions);
+		assertEquals(4, stepExecutions.size());
+		assertTrue(stepNames.contains("AAA_0"));
+		assertTrue(stepNames.contains("BBB_0"));
+		assertTrue(stepNames.contains("CCC_0"));
+		assertTrue(stepNames.contains("DDD_0"));
+	}
+
+	@Test
 	public void twoSplitTest() {
 		setupContextForGraph("<AAA||BBB||CCC> && <DDD||EEE>");
 		Collection<StepExecution> stepExecutions = getStepExecutions();

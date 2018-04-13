@@ -95,10 +95,12 @@ public class ComposedRunnerJobFactory implements FactoryBean<Job> {
 
 		this.visitorDeque = composedRunnerVisitor.getFlow();
 
+		Deque<Flow> executionDeque = new LinkedList<>();
+
 		FlowJobBuilder builder = this.jobBuilderFactory
 				.get(this.taskNameResolver.getTaskName())
 				.start(this.flowBuilder
-						.start(createFlow())
+						.start(createFlow(this.visitorDeque, executionDeque, this.jobDeque))
 						.end())
 				.end();
 		if(this.incrementInstanceEnabled) {
@@ -117,13 +119,12 @@ public class ComposedRunnerJobFactory implements FactoryBean<Job> {
 		return true;
 	}
 
-	private Flow createFlow() {
-		Deque<Flow> executionDeque = new LinkedList<>();
+	private Flow createFlow(Deque<LabelledTaskNode> visitorDeque, Deque<Flow> executionDeque, Deque<Flow> jobDeque) {
 
-		while (!this.visitorDeque.isEmpty()) {
+		while (!visitorDeque.isEmpty()) {
 
-			if (this.visitorDeque.peek() instanceof TaskAppNode) {
-				TaskAppNode taskAppNode = (TaskAppNode) this.visitorDeque.pop();
+			if (visitorDeque.peek() instanceof TaskAppNode) {
+				TaskAppNode taskAppNode = (TaskAppNode) visitorDeque.pop();
 
 				if (taskAppNode.hasTransitions()) {
 					handleTransition(executionDeque, taskAppNode);
@@ -133,19 +134,19 @@ public class ComposedRunnerJobFactory implements FactoryBean<Job> {
 				}
 			}
 			//When end marker of a split is found, process the split
-			else if (this.visitorDeque.peek() instanceof SplitNode) {
-				handleSplit(executionDeque, (SplitNode) this.visitorDeque.pop());
+			else if (visitorDeque.peek() instanceof SplitNode) {
+				handleSplit(visitorDeque, executionDeque, (SplitNode) visitorDeque.pop());
 			}
 			//When start marker of a DSL flow is found, process it.
-			else if (this.visitorDeque.peek() instanceof FlowNode) {
-				handleFlow(executionDeque);
+			else if (visitorDeque.peek() instanceof FlowNode) {
+				handleFlow(visitorDeque, executionDeque, jobDeque);
 			}
 		}
 
-		return this.jobDeque.pop();
+		return jobDeque.pop();
 	}
 
-	private void handleFlow(Deque<Flow> executionDeque) {
+	private void handleFlow(Deque<LabelledTaskNode> visitorDeque, Deque<Flow> executionDeque, Deque<Flow> jobDeque) {
 		if(!executionDeque.isEmpty()) {
 			this.flowBuilder.start(executionDeque.pop());
 		}
@@ -154,18 +155,18 @@ public class ComposedRunnerJobFactory implements FactoryBean<Job> {
 				this.flowBuilder.next(executionDeque.pop());
 		}
 
-		this.visitorDeque.pop();
-		this.jobDeque.push(this.flowBuilder.end());
+		visitorDeque.pop();
+		jobDeque.push(this.flowBuilder.end());
 	}
 
-	private void handleSplit(Deque<Flow> executionDeque, SplitNode splitNode) {
+	private void handleSplit(Deque<LabelledTaskNode> visitorDeque, Deque<Flow> executionDeque, SplitNode splitNode) {
 		FlowBuilder<Flow> taskAppFlowBuilder =
 				new FlowBuilder<>("Flow" + UUID.randomUUID().toString());
 		List<Flow> flows = new ArrayList<>();
 
 		//For each node in the split process it as a DSL flow.
 		for (LabelledTaskNode taskNode : splitNode.getSeries()) {
-			Deque<Flow> elementFlowDeque = processSplitFlow(taskNode);
+			Deque<Flow> elementFlowDeque = processSplitFlow(taskNode, executionDeque);
 			while (!elementFlowDeque.isEmpty()) {
 				flows.add(elementFlowDeque.pop());
 			}
@@ -177,13 +178,13 @@ public class ComposedRunnerJobFactory implements FactoryBean<Job> {
 				.add(flows.toArray(new Flow[flows.size()]))
 				.build();
 
-		//remove the nodes of the split since it has already been processed
-		while (!(this.visitorDeque.peek() instanceof SplitNode)) {
-			this.visitorDeque.pop();
+		while (visitorDeque.peek() != null && !(visitorDeque.peek().equals(splitNode))) {
+			visitorDeque.pop();
+		}
+		if (visitorDeque.peek() != null) {
+			visitorDeque.pop();
 		}
 
-		// pop the SplitNode that marks the beginning of the split from the deque
-		this.visitorDeque.pop();
 		executionDeque.push(taskAppFlowBuilder.start(splitFlow).end());
 	}
 
@@ -192,8 +193,8 @@ public class ComposedRunnerJobFactory implements FactoryBean<Job> {
 	 * @param node represents a single node in the split.
 	 * @return Deque of Job Flows that was obtained from the Node.
 	 */
-	private Deque<Flow> processSplitFlow(LabelledTaskNode node) {
-		TaskParser taskParser = new TaskParser("split_flow", node.stringify(),
+	private Deque<Flow> processSplitFlow(LabelledTaskNode node, Deque<Flow> executionDeque) {
+		TaskParser taskParser = new TaskParser("split_flow" + UUID.randomUUID().toString(), node.stringify(),
 				false, true);
 		ComposedRunnerVisitor splitElementVisitor = new ComposedRunnerVisitor();
 		taskParser.parse().accept(splitElementVisitor);
@@ -220,8 +221,10 @@ public class ComposedRunnerJobFactory implements FactoryBean<Job> {
 				handleFlowForSegment(elementFlowDeque, resultFlowDeque);
 				splitElementDeque.pop();
 			}
+			else if (splitElementDeque.peek() instanceof SplitNode) {
+				handleSplit(splitElementDeque, executionDeque, (SplitNode) splitElementDeque.pop());
+			}
 		}
-
 		return resultFlowDeque;
 	}
 
