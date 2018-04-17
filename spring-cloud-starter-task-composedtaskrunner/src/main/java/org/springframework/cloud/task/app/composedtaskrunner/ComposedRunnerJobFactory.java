@@ -118,6 +118,7 @@ public class ComposedRunnerJobFactory implements FactoryBean<Job> {
 	}
 
 	private Flow createFlow() {
+
 		Deque<Flow> executionDeque = new LinkedList<>();
 
 		while (!this.visitorDeque.isEmpty()) {
@@ -134,7 +135,14 @@ public class ComposedRunnerJobFactory implements FactoryBean<Job> {
 			}
 			//When end marker of a split is found, process the split
 			else if (this.visitorDeque.peek() instanceof SplitNode) {
-				handleSplit(executionDeque, (SplitNode) this.visitorDeque.pop());
+				Deque<LabelledTaskNode> splitNodeDeque = new LinkedList<>();
+				SplitNode splitNode = (SplitNode) this.visitorDeque.pop();
+				splitNodeDeque.push(splitNode);
+				while (!this.visitorDeque.isEmpty() && !this.visitorDeque.peek().equals(splitNode)) {
+					splitNodeDeque.push(this.visitorDeque.pop());
+				}
+				splitNodeDeque.push(this.visitorDeque.pop());
+				handleSplit(splitNodeDeque, splitNode, executionDeque);
 			}
 			//When start marker of a DSL flow is found, process it.
 			else if (this.visitorDeque.peek() instanceof FlowNode) {
@@ -158,33 +166,59 @@ public class ComposedRunnerJobFactory implements FactoryBean<Job> {
 		this.jobDeque.push(this.flowBuilder.end());
 	}
 
-	private void handleSplit(Deque<Flow> executionDeque, SplitNode splitNode) {
+	private void handleSplit(Deque<LabelledTaskNode> visitorDeque, SplitNode splitNode, Deque<Flow> executionDeque) {
 		FlowBuilder<Flow> taskAppFlowBuilder =
 				new FlowBuilder<>("Flow" + UUID.randomUUID().toString());
-		List<Flow> flows = new ArrayList<>();
-
+		Deque<Flow> outerFlow = new LinkedList<>();
 		//For each node in the split process it as a DSL flow.
 		for (LabelledTaskNode taskNode : splitNode.getSeries()) {
-			Deque<Flow> elementFlowDeque = processSplitFlow(taskNode);
-			while (!elementFlowDeque.isEmpty()) {
-				flows.add(elementFlowDeque.pop());
-			}
+			Deque<Flow> resultFlowDeque = new LinkedList<>();
+			Deque<Flow> elementFlowDeque = processSplitFlow(taskNode, resultFlowDeque);
+			outerFlow.addAll(elementFlowDeque);
 		}
-
 		Flow splitFlow = new FlowBuilder.SplitBuilder<>(
 				new FlowBuilder<Flow>("Split" + UUID.randomUUID().toString()),
 				taskExecutor)
-				.add(flows.toArray(new Flow[flows.size()]))
+				.add(outerFlow.toArray(new Flow[outerFlow.size()]))
 				.build();
-
+		Flow taskAppFlow = taskAppFlowBuilder.start(splitFlow).end();
+		executionDeque.push(taskAppFlow);
 		//remove the nodes of the split since it has already been processed
-		while (!(this.visitorDeque.peek() instanceof SplitNode)) {
-			this.visitorDeque.pop();
+		while (visitorDeque.peek() != null && !(visitorDeque.peek().equals(splitNode))) {
+			visitorDeque.pop();
 		}
-
 		// pop the SplitNode that marks the beginning of the split from the deque
-		this.visitorDeque.pop();
-		executionDeque.push(taskAppFlowBuilder.start(splitFlow).end());
+		if (visitorDeque.peek() != null) {
+			visitorDeque.pop();
+		}
+	}
+
+	private Flow handleInnerSplit(Deque<LabelledTaskNode> visitorDeque, SplitNode splitNode) {
+		FlowBuilder<Flow> taskAppFlowBuilder =
+				new FlowBuilder<>("Flow" + UUID.randomUUID().toString());
+
+		Deque<Flow> outerFlow = new LinkedList<>();
+		Deque<Flow> elementFlowDeque = new LinkedList<>();
+		//For each node in the split process it as a DSL flow.
+		for (LabelledTaskNode taskNode : splitNode.getSeries()) {
+			Deque<Flow> resultFlowDeque = new LinkedList<>();
+			Deque<Flow> splitFlow = processSplitFlow(taskNode, resultFlowDeque);
+			outerFlow.addAll(splitFlow);
+		}
+		Flow splitFlow = new FlowBuilder.SplitBuilder<>(
+				new FlowBuilder<Flow>("Split" + UUID.randomUUID().toString()),
+				taskExecutor)
+				.add(outerFlow.toArray(new Flow[outerFlow.size()]))
+				.build();
+		//remove the nodes of the split since it has already been processed
+		while (visitorDeque.peek() != null && !(visitorDeque.peek().equals(splitNode))) {
+			visitorDeque.pop();
+		}
+		// pop the SplitNode that marks the beginning of the split from the deque
+		if (visitorDeque.peek() != null) {
+			visitorDeque.pop();
+		}
+		return taskAppFlowBuilder.start(splitFlow).end();
 	}
 
 	/**
@@ -192,15 +226,14 @@ public class ComposedRunnerJobFactory implements FactoryBean<Job> {
 	 * @param node represents a single node in the split.
 	 * @return Deque of Job Flows that was obtained from the Node.
 	 */
-	private Deque<Flow> processSplitFlow(LabelledTaskNode node) {
-		TaskParser taskParser = new TaskParser("split_flow", node.stringify(),
+	private Deque<Flow> processSplitFlow(LabelledTaskNode node, Deque<Flow> resultFlowDeque) {
+		TaskParser taskParser = new TaskParser("split_flow" + UUID.randomUUID().toString(), node.stringify(),
 				false, true);
 		ComposedRunnerVisitor splitElementVisitor = new ComposedRunnerVisitor();
 		taskParser.parse().accept(splitElementVisitor);
 
 		Deque splitElementDeque = splitElementVisitor.getFlow();
 		Deque<Flow> elementFlowDeque = new LinkedList<>();
-		Deque<Flow> resultFlowDeque = new LinkedList<>();
 
 		while (!splitElementDeque.isEmpty()) {
 
@@ -217,32 +250,40 @@ public class ComposedRunnerJobFactory implements FactoryBean<Job> {
 				}
 			}
 			else if (splitElementDeque.peek() instanceof FlowNode) {
-				handleFlowForSegment(elementFlowDeque, resultFlowDeque);
+				resultFlowDeque.push(handleFlowForSegment(elementFlowDeque));
 				splitElementDeque.pop();
 			}
+			else if (splitElementDeque.peek() instanceof SplitNode) {
+				Deque splitNodeDeque = new LinkedList<>();
+				SplitNode splitNode = (SplitNode) splitElementDeque.pop();
+				splitNodeDeque.push(splitNode);
+				while (!splitElementDeque.isEmpty() && !splitElementDeque.peek().equals(splitNode)) {
+					splitNodeDeque.push(splitElementDeque.pop());
+				}
+				splitNodeDeque.push(splitElementDeque.pop());
+				elementFlowDeque.push(handleInnerSplit(splitNodeDeque, splitNode));
+			}
 		}
-
 		return resultFlowDeque;
 	}
 
-	private void handleFlowForSegment(Deque<Flow> executionDeque,
-			Deque<Flow> resultDeque) {
+	private Flow handleFlowForSegment(Deque<Flow> resultFlowDeque) {
 		FlowBuilder<Flow> localTaskAppFlowBuilder =
 				new FlowBuilder<>("Flow" + UUID.randomUUID().toString());
 
-		if(!executionDeque.isEmpty()) {
-			localTaskAppFlowBuilder.start(executionDeque.pop());
+		if(!resultFlowDeque.isEmpty()) {
+			localTaskAppFlowBuilder.start(resultFlowDeque.pop());
 
 		}
 
-		while (!executionDeque.isEmpty()) {
-			localTaskAppFlowBuilder.next(executionDeque.pop());
+		while (!resultFlowDeque.isEmpty()) {
+			localTaskAppFlowBuilder.next(resultFlowDeque.pop());
 		}
 
-		resultDeque.push(localTaskAppFlowBuilder.end());
+		return localTaskAppFlowBuilder.end();
 	}
 
-	private void handleTransition(Deque<Flow> executionDeque,
+	private void handleTransition(Deque<Flow> resultFlowDeque,
 			TaskAppNode taskAppNode) {
 		String beanName = getBeanName(taskAppNode);
 		Step currentStep = this.context.getBean(beanName, Step.class);
@@ -262,7 +303,7 @@ public class ComposedRunnerJobFactory implements FactoryBean<Job> {
 					.from(currentStep);
 		}
 
-		if (wildCardPresent && !executionDeque.isEmpty()) {
+		if (wildCardPresent && !resultFlowDeque.isEmpty()) {
 			throw new IllegalStateException(
 					"Invalid flow following '*' specifier.");
 		}
@@ -270,14 +311,12 @@ public class ComposedRunnerJobFactory implements FactoryBean<Job> {
 			//if there are nodes are in the execution Deque.  Make sure that
 			//they are processed as a target of the wildcard instead of the
 			//whole transition.
-			if (!executionDeque.isEmpty()) {
-				Deque<Flow> resultDeque = new LinkedList<>();
-				handleFlowForSegment(executionDeque, resultDeque);
-				builder.on(WILD_CARD).to(resultDeque.pop()).from(currentStep);
+			if (!resultFlowDeque.isEmpty()) {
+				builder.on(WILD_CARD).to(handleFlowForSegment(resultFlowDeque)).from(currentStep);
 			}
 		}
 
-		executionDeque.push(builder.end());
+		resultFlowDeque.push(builder.end());
 	}
 
 	private String getBeanName(TransitionNode transition) {
